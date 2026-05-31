@@ -1,8 +1,0 @@
-bot_token: "8677011641:AAHpYFmO5waoBMNrWcv7BovZLKl5Hpnxd2w"
-chat_id: -1003796407734
-watch_dir: "/home/ari/Documents/export"
-max_file_size_bytes: 2147483648 # 2GB
-
-mappings:
-  disegni: 4 # subfolder name → Telegram topic ID
-  musica: 5

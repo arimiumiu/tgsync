@@ -3,13 +3,15 @@ package main
 import (
 	_ "embed"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
-	"github.com/gen2brain/beeep"
 	"fyne.io/systray"
+	"github.com/gen2brain/beeep"
 
 	"tgsync/app"
 )
@@ -21,7 +23,7 @@ var iconPNG []byte
 var iconICO []byte
 
 func main() {
-	cfgPath := flag.String("config", "config.yaml", "path to config file")
+	cfgPath := flag.String("config", defaultConfigPath(), "path to config file")
 	flag.Parse()
 
 	// systray.Run blocks the main goroutine (required on macOS).
@@ -31,7 +33,6 @@ func main() {
 
 func onReady(cfgPath string) func() {
 	return func() {
-		// Set tray icon — Windows wants ICO, others PNG
 		if runtime.GOOS == "windows" {
 			systray.SetIcon(iconICO)
 		} else {
@@ -43,8 +44,9 @@ func onReady(cfgPath string) func() {
 		mStatus := systray.AddMenuItem("⏳ Starting…", "Current status")
 		mStatus.Disable()
 		systray.AddSeparator()
+		mEditConfig := systray.AddMenuItem("Edit config…", "Open config.yaml in default editor")
 		mOpenFolder := systray.AddMenuItem("Open watch folder", "Open the watched folder in your file manager")
-		mReload := systray.AddMenuItem("Reload config", "Reload config.yaml without restarting")
+		mReload     := systray.AddMenuItem("Reload config", "Reload config.yaml without restarting")
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("Quit", "Quit tgsync")
 
@@ -52,46 +54,64 @@ func onReady(cfgPath string) func() {
 			_ = beeep.Notify(title, body, "")
 		}
 
-		a, err := app.New(cfgPath, notify)
+		if err := ensureConfig(cfgPath); err != nil {
+			log.Printf("warn: could not create default config: %v", err)
+		}
+
+		// tryStart attempts to create the app and start the watcher.
+		// Returns (app, nil) on success, (nil, err) on failure.
+		tryStart := func() (*app.App, error) {
+			a, err := app.New(cfgPath, notify)
+			if err != nil {
+				return nil, err
+			}
+			if err := a.Start(); err != nil {
+				return nil, err
+			}
+			return a, nil
+		}
+
+		a, err := tryStart()
 		if err != nil {
-			log.Printf("fatal: %v", err)
+			log.Printf("error: %v", err)
 			mStatus.SetTitle("❌ Config error — check logs")
 			mStatus.Enable()
-			// Keep tray alive so the user can quit cleanly
-			<-mQuit.ClickedCh
-			systray.Quit()
-			return
+		} else {
+			mStatus.SetTitle("✅ Watching")
 		}
-
-		if err := a.Start(); err != nil {
-			log.Printf("fatal: %v", err)
-			mStatus.SetTitle("❌ Start error — check logs")
-			mStatus.Enable()
-			<-mQuit.ClickedCh
-			systray.Quit()
-			return
-		}
-
-		mStatus.SetTitle("✅ Watching")
 
 		for {
 			select {
+			case <-mEditConfig.ClickedCh:
+				openFile(cfgPath)
+
 			case <-mOpenFolder.ClickedCh:
-				openFolder(a.WatchDir())
+				if a != nil {
+					openFolder(a.WatchDir())
+				} else {
+					openFolder(filepath.Dir(cfgPath))
+				}
 
 			case <-mReload.ClickedCh:
 				mStatus.SetTitle("⏳ Reloading…")
-				if err := a.Reload(); err != nil {
+				if a != nil {
+					a.Stop()
+				}
+				a, err = tryStart()
+				if err != nil {
 					log.Printf("reload error: %v", err)
-					mStatus.SetTitle("❌ Reload failed — check logs")
-					_ = beeep.Notify("tgsync — reload failed", err.Error(), "")
+					mStatus.SetTitle("❌ Config error — check logs")
+					mStatus.Enable()
+					notify("tgsync — reload failed", err.Error())
 				} else {
 					mStatus.SetTitle("✅ Watching")
-					_ = beeep.Notify("tgsync", "Config reloaded ✓", "")
+					notify("tgsync", "Config reloaded ✓")
 				}
 
 			case <-mQuit.ClickedCh:
-				a.Stop()
+				if a != nil {
+					a.Stop()
+				}
 				systray.Quit()
 				return
 			}
@@ -103,6 +123,31 @@ func onExit() {
 	os.Exit(0)
 }
 
+func defaultConfigPath() string {
+    if dir, err := os.UserConfigDir(); err == nil {
+        return filepath.Join(dir, "tgsync", "config.yaml")
+    }
+    return "config.yaml"
+}
+
+func ensureConfig(path string) error {
+    if _, err := os.Stat(path); err == nil {
+        return nil // already exists
+    }
+    if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+        return fmt.Errorf("create config dir: %w", err)
+    }
+    return os.WriteFile(path, []byte(defaultConfig), 0644)
+}
+
+const defaultConfig = `bot_token: ""
+chat_id: 0
+watch_dir: ""
+
+mappings:
+  # subfolder-name: topic-id
+  # docs: 12
+`
 // openFolder opens the given directory in the native file manager.
 func openFolder(path string) {
 	var cmd *exec.Cmd
@@ -117,4 +162,18 @@ func openFolder(path string) {
 	if err := cmd.Start(); err != nil {
 		log.Printf("warn: could not open folder: %v", err)
 	}
+}
+
+func openFile(path string) {
+	var cmd *exec.Cmd
+	log.Printf("i am opening a file")
+	switch runtime.GOOS {
+		case "windows":
+			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+		case "darwin":
+			cmd = exec.Command("open", path)
+		default:
+			cmd = exec.Command("xdg-open", path)
+	}
+	_ = cmd.Start()
 }
